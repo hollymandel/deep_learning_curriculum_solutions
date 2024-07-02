@@ -17,15 +17,48 @@ b is the batch size
 
 def create_mask(N):
     """
-    returns a NxN mask that is true for i <= j
+    Creates an attention mask of size NxN that is True for indices where i >= j. Because 
+    the mask will be added to the key-query products prior to the application of softmax, 
+    False values are represented as a large negative number and True values are represented 
+    as 0.
+
+    This mask is used in sequence processing tasks to prevent earlier tokens from attending
+    to later tokens.
+
+    Parameters:
+    N (int): The size of the mask, which will be NxN.
+
+    Returns:
+    torch.Tensor: A tensor of shape (N, N) where the value is True (represented as 0) 
+                  for positions where the row index is greater than or equal to the column 
+                  index, and False (represented as -1e9) otherwise. 
+                  
+                  For example, if N = 3:
+                    tensor([[-0.0000e+00, -1.0000e+09, -1.0000e+09],
+                            [-0.0000e+00, -0.0000e+00, -1.0000e+09],
+                            [-0.0000e+00, -0.0000e+00, -0.0000e+00]])
     """
+
     return (torch.range(1,N).repeat(N,1) > torch.range(1,N).repeat(N,1).transpose(0,1)
         ) * -1e9
     
 def positional_encoder(M, N, R = 100):
     """
-    R is a parameter of the positional encoder. 
-    R should be much larger than M. Wikipedia calls R -> N.
+    Generates a positional encoding matrix for a sequence of length N in a M dimensional space.
+    Added to input to inject information about the positions of elements in the sequence since
+    the architecture itself does not encode this information.
+
+    Parameters:
+    M (int): The number of dimensions for each position encoding, equal to the model embedding
+            dimension. Must be an even number.
+    N (int): The length of the sequence.
+    R (int, optional): A scaling factor for the positional encoding. Should be much larger 
+                       than M to ensure sufficient separation between different positions.
+                       Defaults to 100.
+
+    Returns:
+    torch.Tensor: A tensor of shape (N, M) containing the positional encodings. Each row
+                  corresponds to the positional encoding for one position in the sequence.
     """
     r = np.power(R,2/M)
     ts = torch.arange(0,N).repeat(int(M/2),1)
@@ -35,7 +68,38 @@ def positional_encoder(M, N, R = 100):
         (torch.sin(thetas),torch.cos(thetas)), dim=1).view(M,N).transpose(0,1)
 
 class AttnHead(nn.Module):
+    """
+    Attention Head module for implementing scaled dot-product attention. The attention
+    head computes the attention scores and applies them to the value vectors to obtain
+    the output.
+
+    Attributes:
+    M (int): The representation dimension of the input and output vectors.
+    N (int): The length of the input sequence.
+    masked (bool): If True, applies a mask to prevent attention to future positions.
+    WQ (nn.Linear): Learnable linear layer to project inputs to query vectors.
+    WK (nn.Linear): Learnable linear layer to project inputs to key vectors.
+    WV (nn.Linear): Learnable linear layer to project inputs to value vectors.
+    mask (torch.Tensor): Mask to be applied if `masked` is True.
+
+    Methods:
+    dot_product_attn(Q, K, V):
+        Computes the attention scores by taking the dot product between queries Q
+        and keys K. Then uses the attention scores to linearly combine the values V.
+    forward(x):
+        Projects the input through linear layers to obtain Q, K, V, and then applies
+        the dot-product attention.
+    """
     def __init__(self, M, N, masked = False):
+        """
+        Initializes the AttnHead module.
+
+        Parameters:
+        M (int): The representation dimensional of the input and output vectors.
+        N (int): The length of the input sequence.
+        masked (bool, optional): If True, applies a mask to prevent attention to future
+                                 positions. Defaults to False.
+        """
         super().__init__()
         self.WQ = nn.Linear(in_features = M, out_features = M, bias = False)
         self.WK = nn.Linear(in_features = M, out_features = M, bias = False)
@@ -48,8 +112,15 @@ class AttnHead(nn.Module):
  
     def dot_product_attn(self, Q, K, V):
         """
-        Q, K should be b x N x M
-        V should be b x N x M
+        Computes the dot-product attention with optional masking.
+
+        Parameters:
+        Q (torch.Tensor): Query vectors of shape (b, N, M).
+        K (torch.Tensor): Key vectors of shape (b, N, M).
+        V (torch.Tensor): Value vectors of shape (b, N, M).
+
+        Returns:
+        torch.Tensor: Output after applying attention, of shape (b, N, M).
         """
         KQ = torch.matmul(Q, torch.transpose(K,1,2)) / np.sqrt(self.M)
         if self.masked:
@@ -58,11 +129,45 @@ class AttnHead(nn.Module):
         return torch.matmul(KQ,V) 
         
     def forward(self, x):
+        """
+        Forward pass through the attention head.
+
+        Parameters:
+        x (torch.Tensor): Input tensor of shape (b, N, M).
+
+        Returns:
+        torch.Tensor: Output tensor after applying attention, of shape (b, N, M).
+        """
         Q, K, V = self.WQ(x), self.WK(x), self.WV(x)
         return self.dot_product_attn(Q,K,V)
     
 class MultiHead(nn.Module):
+    """
+    Multi-Head Attention module for running multiple attention heads in parallel and
+    linearly combining their outputs using a learned fully-connected layer.
+
+    Attributes:
+    masked (bool): If True, applies a mask to prevent attention to future positions.
+    O (nn.Linear): Learned linear layer to project the concatenated outputs of the 
+        attention heads.
+    ahs (nn.ModuleList): List of attention heads (AttnHead instances).
+
+    Methods:
+    forward(x):
+        Applies the multi-head attention to the input.
+    """
     def __init__(self, M, N, d_out = None, masked = False, n_heads = 1):
+        """
+        Initializes the MultiHead module.
+
+        Parameters:
+        M (int): The dimensionality of the input and output vectors.
+        N (int): The length of the input sequence.
+        d_out (int, optional): The dimensionality of the output vectors. Defaults to M.
+        masked (bool, optional): Parameter passed to AttnHead module. If True, attention heads
+                                 apply a causal mask.Defaults to False.
+        n_heads (int, optional): The number of attention heads. Defaults to 1.
+        """
         super().__init__()
         d_out = d_out or M
         self.masked = masked
@@ -71,6 +176,16 @@ class MultiHead(nn.Module):
             [ AttnHead(M, N, masked = masked) for _ in range(n_heads) ])
         
     def forward(self, x):
+        """
+        Applies the multi-head attention to the input.
+
+        Parameters:
+        x (torch.Tensor): Input tensor of shape (b, N, M).
+
+        Returns:
+        torch.Tensor: Output tensor after applying multi-head attention,
+                      of shape (b, N, d_out).
+        """
         xp = [ ah(x) for ah in self.ahs ]
         xp = torch.cat(xp, 2)
         return self.O(xp)
