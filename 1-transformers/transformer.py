@@ -191,17 +191,51 @@ class MultiHead(nn.Module):
         return self.O(xp)
     
 class AttnBlock(nn.Module):
-    def __init__(self, M, N, n_masked_heads = 1, n_unmasked_heads = 1):
+    """
+    Attention Block module for combining two masked attention heads and one fully connected
+    layer with layer norm in between and a dropout layer at the end. 
+
+    Attributes:
+    head1, head2 (MulltiHead): multi-head attention with masking.
+    feedwordward (nn.Linear): fully connected layer
+    ln1, ln2, ln3 (nn.LayerNorm): Layer normalization after the first attention head.
+    dropout (nn.Dropout): Dropout layer for regularization.
+
+    Methods:
+    forward(x):
+        Applies the attention block to the input.
+    """
+
+    def __init__(self, M, N, n_heads):
+        """
+        Initializes the AttnBlock module.
+
+        Parameters:
+        M (int): The dimensionality of the input and output vectors.
+        N (int): The length of the input sequence.
+        n_heads (int, optional): The number of parallel attention heads in each Multihead. 
+            Defaults to 1.
+        """
         super().__init__()
-        self.head1 = MultiHead(M, N, n_heads = n_masked_heads, masked = True)
+        self.head1 = MultiHead(M, N, n_heads = n_heads, masked = True)
         self.ln1 = nn.LayerNorm(M)
-        self.head2 = MultiHead(M, N, n_heads = n_unmasked_heads, masked = True)
+        self.head2 = MultiHead(M, N, n_heads = n_heads, masked = True)
         self.ln2 = nn.LayerNorm(M)
         self.feedforward = nn.Linear(in_features = M, out_features = M)
         self.ln3 = nn.LayerNorm(M)
         self.dropout = nn.Dropout(0.5) 
     
     def forward(self, x):
+        """
+        Applies the attention block to the input.
+
+        Parameters:
+        x (torch.Tensor): Input tensor of shape (b, N, M).
+
+        Returns:
+        torch.Tensor: Output tensor after applying the attention block,
+                      of shape (b, N, M).
+        """
         x = x + self.head1(x)
         x = self.ln1(x)
         x = x + self.head2(x)
@@ -212,6 +246,21 @@ class AttnBlock(nn.Module):
         return x
     
 class Transformer(nn.Module):
+    """
+    Transformer model for causal sequence-to-sequence tasks.
+
+    Attributes:
+    embed_dim (int): The dimensionality of the input embeddings (None for no embedding layer).
+    embedding_layer (nn.Linear): Linear layer to project input embeddings to the model dimension.
+    embedding_ln (nn.LayerNorm): Layer normalization for the input embeddings.
+    positional_encoder (torch.Tensor): Positional encoding matrix.
+    attnBlocks (nn.ModuleList): List of attention blocks.
+    linear (nn.Linear): Linear layer to project the final output to the target dimensionality.
+
+    Methods:
+    forward(x):
+        Applies the Transformer model to the input.
+    """
     def __init__(
         self, 
         N, 
@@ -221,6 +270,20 @@ class Transformer(nn.Module):
         d_target = None,
         embed_dim = None,
     ): 
+        """
+        Initializes the Transformer model.
+
+        Parameters:
+        N (int): The number of tokens in the input sequence.
+        M (int): The representation dimension of the model.
+        n_blocks (int, optional): The number of attention blocks. Defaults to 1.
+        n_heads (int, optional): The number of attention heads in each block. Defaults to 1.
+        d_target (int, optional): The dimensionality of the output vectors. Defaults to M.
+        embed_dim (int, optional): The dimension of the input vector. If provided, an embedding 
+                                   layer is added to transform from embed_dim to M. If omitted, 
+                                   there is no input embedding, and the dimension of inputs must
+                                   already be M.
+        """
         super().__init__()
         d_target = d_target or M
         self.embed_dim = embed_dim
@@ -232,6 +295,16 @@ class Transformer(nn.Module):
         self.linear = nn.Linear(M, d_target)
 
     def forward(self, x):
+        """
+        Applies the Transformer model to the input.
+
+        Parameters:
+        x (torch.Tensor): Input tensor of shape (b, N, embed_dim) if embed_dim is provided,
+                          otherwise of shape (b, N, M).
+
+        Returns:
+        torch.Tensor: Output tensor of shape (b, N, d_target).
+        """
         if self.embed_dim:
             x = self.embedding_layer(x)
             x = self.embedding_ln(x)
